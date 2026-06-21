@@ -2,14 +2,15 @@
 src/nm/nm
 src/ss/ss
 src/client/client
+build/
 
 # object files
 *.o
 *.out
 
 # test files (keep folder, ignore contents)
-files/*
-!files/.gitkeep
+src/ss/files/*
+!src/ss/files/.gitkeep
 
 # OS/editor junk
 .DS_Store
