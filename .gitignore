@@ -1,0 +1,17 @@
+# compiled binaries
+src/nm/nm
+src/ss/ss
+src/client/client
+
+# object files
+*.o
+*.out
+
+# test files (keep folder, ignore contents)
+files/*
+!files/.gitkeep
+
+# OS/editor junk
+.DS_Store
+*.swp
+.vscode/
