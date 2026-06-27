@@ -1,73 +1,75 @@
-#include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <asm-generic/socket.h>
+#include "common.h"
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <sys/time.h>
 
-#define PORT 9001
 
-// NEW FUNCTION - this is the only thing that's actually new
-void send_file(int client_fd, char *filename) {
-    FILE *fp = fopen(filename, "r");
-    if (fp == NULL) {
-        char *err = "ERROR: file not found";
-        send(client_fd, err, strlen(err), 0);
-        return;
+static int ss_register_once(void){
+    int fd = nm_connect();
+    if (fd < 0){
+        fprintf(stdout, "[SS] Failed to connect to NM at %s:%d\n", NM_IP, NM_PORT);
+        return -1;
     }
-    char buffer[1024];
-    int bytes_read;
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), fp)) > 0) {
-        send(client_fd, buffer, bytes_read, 0);
+
+    char ip[64];
+    get_local_ip(ip);
+
+    char files[1024][256];
+    int nfiles = list_files(files, 1024);
+
+    dprintf(fd,
+            "SS_REGISTER\n"
+            "IP: %s\n"
+            "CLIENT_PORT: %d\n"
+            "FILES: %d\n"
+            "END\n",
+            ip, SS_CLIENT_PORT, nfiles);
+    fflush(stdout);
+
+    char buf[256];
+    int r = recv(fd, buf, sizeof(buf) - 1, 0);
+
+    if (r <= 0) {
+        fprintf(stdout, "[SS] No response from NM.\n");
+        close(fd);
+        return -1;
     }
-    fclose(fp);
+
+    buf[r] = '\0';
+    if (strncmp(buf, "OK", 2) == 0){
+        fprintf(stdout, "[SS] Registration successful with NM (%s:%d)\n", NM_IP, NM_PORT);
+        close(fd);
+        return 0;
+    }
+    else {
+        fprintf(stdout, "[SS] Unexpected NM reply: %s\n", buf);
+        close(fd);
+        return -1;
+    }
+
 }
 
-int main(int argc, char const* argv[])
-{
-    int server_fd, new_socket;
-    ssize_t valread;
-    struct sockaddr_in address;
-    int opt = 1;
-    socklen_t addrlen = sizeof(address);
-    char buffer[1024] = { 0 };
+// runs as a thread in the background so ss can continue other tasks
+static void* register_thread(void* arg) {
+    (void)arg;
+    int backoff_ms = 500;
+    const int max_backoff_ms = 8000;
 
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-    if (setsockopt(server_fd, SOL_SOCKET,
-                   SO_REUSEADDR | SO_REUSEPORT, &opt,
-                   sizeof(opt))) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
-    }
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    while (1){
+        if (ss_register_once()==0){
+            fprintf(stdout, "[SS] Registered successfully with NM.\n");
+            fflush(stdout);
+            break;
+        }
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
-    if (listen(server_fd, 3) < 0) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-    if ((new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
-        perror("accept");
-        exit(EXIT_FAILURE);
+        fprintf(stdout, "[SS] Registration failed, retrying in %d ms\n", backoff_ms);
+        fflush(stdout);
+        usleep(backoff_ms*1000);
+        if (backoff_ms < max_backoff_ms){ // exponential backoff to prevent bombarding the nm with requests
+            backoff_ms *= 2;
+        }
     }
 
-    // read the filename the client sends
-    valread = read(new_socket, buffer, 1024 - 1);
-    printf("Client requested: %s\n", buffer);
-
-    // NEW: send the file instead of a hello message
-    send_file(new_socket, buffer);
-
-    close(new_socket);
-    close(server_fd);
-    return 0;
+    return NULL;
 }

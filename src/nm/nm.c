@@ -1,57 +1,80 @@
-#include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <asm-generic/socket.h>
+#include "common.h"
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <sys/time.h>
 
-#define PORT 5000
+#define MAX_FILES 100
+#define MAX_STORAGE_SERVERS 10
+#define MAX_CLIENTS 50
+#define MAX_REGISTERED_USERS 100
 
-// hardcoded lookup table for now — no hashmap yet
-char* lookup(char *filename) {
-    if (strcmp(filename, "files/hello.txt") == 0)
-        return "127.0.0.1:9001";
-    return "ERROR: file not found";
-}
+static StorageServerInfo storage_servers[MAX_STORAGE_SERVERS];
+static int ss_count = 0;
 
-int main() {
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int opt = 1;
-    socklen_t addrlen = sizeof(address);
-    char buffer[1024] = { 0 };
 
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-    setsockopt(server_fd, SOL_SOCKET,
-               SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    bind(server_fd, (struct sockaddr*)&address, sizeof(address));
-    listen(server_fd, 3);
-
-    if ((new_socket = accept(server_fd, (struct sockaddr*)&address,
-                             &addrlen)) < 0) {
-        perror("accept");
-        exit(EXIT_FAILURE);
+void handle_ss_register(int client_fd){
+    char buf[2048];
+    ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0){
+        close(client_fd);
+        return;
     }
 
-    // read filename from client
-    read(new_socket, buffer, 1024 - 1);
-    printf("NM received request for: %s\n", buffer);
+    buf[n] = '\0';
+    printf("[NM] Received SS registration request:\n%s\n", buf);
 
-    // look up which SS has it and reply
-    char *response = lookup(buffer);
-    send(new_socket, response, strlen(response), 0);
-    printf("NM replied with: %s\n", response);
+    char ip[INET_ADDRSTRLEN] = "127.0.0.1";
+    int client_port = 0;
+    int nfiles = 0;
 
-    close(new_socket);
-    close(server_fd);
-    return 0;
+    char *line = strtok(buf, '\n');
+    while (line != NULL){
+        if (strncmp(line, "IP:", 3) == 0){
+            sscanf(line + 4, "%15s", ip);
+        }else if (strncmp(line, "CLIENT_PORT:", 12) == 0){
+            sscanf(line + 13, "%d", &client_port);
+        }else if (strncmp(line, "FILES:", 6) == 0){
+            sscanf(line + 7, "%d", &nfiles);
+        }
+
+        line = strtok(NULL, "\n");
+    }
+
+    // mutex lock to make sure storage server list update has no race conditions
+    pthead_mutex_lock(&lock);
+    
+    // check if ss already registered
+    int ss_index = -1;
+    for(int i = 0; i < ss_count; i++){
+        if(storage_servers[i].client_port == client_port){
+            ss_index = i;
+            break;
+        }
+    }
+
+    if (ss_index == -1 && ss_count < MAX_STORAGE_SERVERS) {
+        ss_index = ss_count++;
+    }
+
+    if (ss_index != -1){
+        strncpy(storage_servers[ss_index].ip, ip, INET_ADDRSTRLEN);
+        storage_servers[ss_index].port = client_port; // same port for now, both external everyday users and nm communication are on on port, port separation later
+        storage_servers[ss_index].client_port = client_port;
+        storage_servers[ss_index].active = 1;
+        snprintf(storage_servers[ss_index].storage_path, 256, "./data");
+        
+        printf("[NM] Registered SS: %s:%d (files: %d)\n", ip, client_port, nfiles);
+    }
+
+    pthread_mutex_unlock(&lock);
+    
+    dprintf(client_fd, "OK\n");
+    printf("[NM] Sent OK to storage server\n");
+    
+    char logmsg[256];
+    snprintf(logmsg, sizeof(logmsg), "SS_REGISTER %s:%d", ip, client_port);
+    log_event("NM", logmsg);
+    
+    close(client_fd);
 }
